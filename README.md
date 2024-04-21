@@ -2,6 +2,16 @@
 
 一款基于[Suno](https://suno.com/)和[Suno-API](https://github.com/SunoAI-API/Suno-API)创作音乐的chatgpt-on-wechat插件。
 
+## 插件效果
+
+1. 创作音乐
+
+![创作音乐](./images/创作音乐.jpg)
+
+2. Suno超过限额之后，仅创作歌词
+
+![创作歌词](./images/创作歌词.jpg)
+
 ## 安装方法
 
 **1. 浏览器访问[Suno](https://suno.com/)，获取当前账户的`session_id`和`Cookie`。**
