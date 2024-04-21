@@ -1,0 +1,5 @@
+{
+  "suno_api_bases": ["http://127.0.0.1:8000"],
+  "music_create_prefixes": ["唱"],
+  "music_output_dir": "/tmp"
+}
