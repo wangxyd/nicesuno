@@ -18,7 +18,7 @@ from plugins import *
     desire_priority=90,
     hidden=False,
     desc="一款基于Suno和Suno-API创作音乐的插件。",
-    version="1.0",
+    version="1.1",
     author="空心菜",
 )
 class Nicesuno(Plugin):
@@ -38,6 +38,9 @@ class Nicesuno(Plugin):
             self.suno_api_bases = conf.get("suno_api_bases")
             self.music_create_prefixes = conf.get("music_create_prefixes")
             self.music_output_dir = conf.get("music_output_dir", "/tmp")
+            if not os.path.exists(self.music_output_dir):
+                logger.info(f"[Nicesuno] music_output_dir={self.music_output_dir} not exists, create it.")
+                os.makedirs(self.music_output_dir)
             if self.suno_api_bases and isinstance(self.suno_api_bases, List) \
                     and self.music_create_prefixes and isinstance(self.music_create_prefixes, List):
                 logger.info("[Nicesuno] inited")
@@ -145,6 +148,7 @@ class Nicesuno(Plugin):
         to_user_nickname = context["msg"].to_user_nickname
         # 获取歌词和音乐
         initial_delay_seconds = 15
+        last_lyrics = ""
         for aid in aids:
             # 检查音乐是否创作完成
             start_time = time.time()
@@ -162,10 +166,14 @@ class Nicesuno(Plugin):
             title, metadata, audio_url = data["title"], data["metadata"], data["audio_url"]
             lyrics, tags, description_prompt = metadata["prompt"], metadata["tags"], metadata['gpt_description_prompt']
             # 发送歌词
-            reply_text = f"🎻{title}🎻\n\n{lyrics}\n\n🎹风格: {tags}\n👶发起人：{actual_user_nickname}\n🍀制作人：Suno\n🎤提示词: {description_prompt}"
-            logger.debug(f"[Nicesuno] 发送歌词，reply_text={reply_text}")
-            reply = Reply(ReplyType.TEXT, reply_text)
-            channel.send(reply, context)
+            if lyrics != last_lyrics:
+                reply_text = f"🎻{title}🎻\n\n{lyrics}\n\n🎹风格: {tags}\n👶发起人：{actual_user_nickname}\n🍀制作人：Suno\n🎤提示词: {description_prompt}"
+                logger.debug(f"[Nicesuno] 发送歌词，reply_text={reply_text}")
+                last_lyrics = lyrics
+                reply = Reply(ReplyType.TEXT, reply_text)
+                channel.send(reply, context)
+            else:
+                logger.debug("[Nicesuno] 歌词和上次相同，不再重复发送歌词！")
             # 下载音乐
             filename = f"{int(time.time())}_{sanitize_filename(description_prompt).replace(' ', '')[:20]}"
             audio_path = os.path.join(self.music_output_dir, f"{filename}.mp3")
