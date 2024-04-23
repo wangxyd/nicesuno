@@ -17,9 +17,9 @@
 **1. 浏览器访问[Suno](https://suno.com/)，获取当前账户的`session_id`和`Cookie`。**
 
 + 浏览器访问并登录Suno：https://suno.com/
-+ 按下F12打开开发者工具，选择“网络”标签；
-+ 刷新页面或者随便点击一下网页，找到类似`tokens?_clerk_js_version=4.72.0-snapshot.vc141245`或者`touch?_clerk_js_version=4.72.0-snapshot.vc141245`的请求，获取该Request URL中的`session_id`以及`Cookie`；
-+ 比如Request URL为`https://clerk.suno.com/v1/client/sessions/sess_xeNbYcD4zOK89Vzwipl30x5gWq3/tokens?_clerk_js_version=4.72.0-snapshot.vc141245`，则`session_id`是`sess_xeNbYcD4zOK89Vzwipl30x5gWq3`。
++ 按F12键打开开发者工具，选择“网络”标签；
++ 稍等一分钟就会出现类似`tokens?_clerk_js_version=4.72.0-snapshot.vc141245`的请求，获取该Request URL中的`Session_id`以及`Cookie`；
++ 比如：这里的Request URL为`https://clerk.suno.com/v1/client/sessions/sess_xeNbYcD4zOK89Vzwipl30x5gWq3/tokens?_clerk_js_version=4.72.0-snapshot.vc141245`，则`Session_id`是`sess_xeNbYcD4zOK89Vzwipl30x5gWq3`。
 
 **2. 部署SunoAI-API**
 
@@ -63,15 +63,21 @@ cp config.json.template config.json
 vi config.json
 {
   "suno_api_bases": ["http://127.0.0.1:8000"],
-  "music_create_prefixes": ["唱"],
-  "music_output_dir": "/tmp"
+  "music_create_prefixes": ["唱", "演唱"],
+  "instrumental_create_prefixes": ["演奏"],
+  "music_output_dir": "/tmp/nicesuno",
+  "is_send_lyrics": true,
+  "is_send_covers": true
 }
 ```
 
 以上配置项中：
 
 - `suno_api_bases`: Suno-API的监听地址和端口，注意该参数的值为一个字符串数组，后续用于实现自动切换Suno账号；
-- `music_create_prefixes`: 创建音乐的消息前缀，注意该参数的值为一个字符串数组；
-- `music_output_dir`: 音乐的存储目录，默认为`/tmp`。
+- `music_create_prefixes`: 创作声乐的消息前缀，注意该参数的值为一个字符串数组；
+- `instrumental_create_prefixes`: 创作器乐的消息前缀，注意该参数的值为一个字符串数组；
+- `music_output_dir`: 创作的音乐的存储目录，默认为`/tmp/nicesuno`；
+- `is_send_lyrics`: 是否获取并发送歌词，默认为`true`；
+- `is_send_covers`: 是否下载并发送封面，默认为`true`。
 
 有更好的想法或建议，欢迎积极提出哦~~~

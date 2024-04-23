@@ -1,5 +1,8 @@
 {
   "suno_api_bases": ["http://127.0.0.1:8000"],
-  "music_create_prefixes": ["唱"],
-  "music_output_dir": "/tmp"
+  "music_create_prefixes": ["唱", "演唱"],
+  "instrumental_create_prefixes": ["演奏"],
+  "music_output_dir": "/tmp/nicesuno",
+  "is_send_lyrics": true,
+  "is_send_covers": true
 }
