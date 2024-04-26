@@ -1,5 +1,6 @@
 # encoding:utf-8
 import os
+import re
 import json
 import time
 import requests
@@ -18,7 +19,7 @@ from plugins import *
     desire_priority=90,
     hidden=False,
     desc="一款基于Suno和Suno-API创作音乐的插件。",
-    version="1.2",
+    version="1.3",
     author="空心菜",
 )
 class Nicesuno(Plugin):
@@ -38,6 +39,7 @@ class Nicesuno(Plugin):
             self.suno_api_bases = conf.get("suno_api_bases", [])
             self.music_create_prefixes = conf.get("music_create_prefixes", [])
             self.instrumental_create_prefixes = conf.get("instrumental_create_prefixes", [])
+            self.lyrics_create_prefixes = conf.get("lyrics_create_prefixes", [])
             self.music_output_dir = conf.get("music_output_dir", "/tmp")
             self.is_send_lyrics = conf.get("is_send_lyrics", True)
             self.is_send_covers = conf.get("is_send_covers", True)
@@ -65,138 +67,117 @@ class Nicesuno(Plugin):
             content = context.content
             logger.debug(f"[Nicesuno] on_handle_context. content={content}")
 
-            # 判断是否包含创作声乐/器乐的前缀
-            make_instrumental = False
+            # 判断是否包含创作的前缀
+            make_instrumental, make_lyrics = False, False
             music_create_prefix = self._check_prefix(content, self.music_create_prefixes)
             instrumental_create_prefix = self._check_prefix(content, self.instrumental_create_prefixes)
+            lyrics_create_prefix = self._check_prefix(content, self.lyrics_create_prefixes)
             if music_create_prefix:
-                suno_music_prompt = content[len(music_create_prefix):].strip()
+                suno_prompt = content[len(music_create_prefix):].strip()
             elif instrumental_create_prefix:
                 make_instrumental = True
-                suno_music_prompt = content[len(instrumental_create_prefix):].strip()
+                suno_prompt = content[len(instrumental_create_prefix):].strip()
+            elif lyrics_create_prefix:
+                make_lyrics = True
+                suno_prompt = content[len(lyrics_create_prefix):].strip()
             else:
-                logger.debug(f"[Nicesuno] content not starts with music_create_prefixes or instrumental_create_prefixes, ignored.")
+                logger.debug(f"[Nicesuno] content starts without any suno prefixes, ignored.")
                 return
 
-            # 判断是否包含创作音乐的提示词
-            if not suno_music_prompt:
-                logger.info("[Nicesuno] suno_music_prompt is empty, ignored.")
+            # 判断是否包含创作的提示词
+            if not suno_prompt:
+                logger.info("[Nicesuno] content starts without any suno prompts, ignored.")
                 return
 
-            # 获取用户信息
-            channel = e_context["channel"]
-            actual_user_nickname = context["msg"].actual_user_nickname or context["msg"].other_user_nickname
-            to_user_nickname = context["msg"].to_user_nickname
-
-            # 创作音乐
-            logger.info(f"[Nicesuno] start generating, suno_music_prompt={suno_music_prompt}, make_instrumental={make_instrumental}.")
-            data = self._suno_generate_music_with_description(suno_music_prompt, make_instrumental=make_instrumental)
-            if not data:
-                error = f"response data of _suno_generate_music_with_description is empty."
-                raise Exception(error)
-            # 如果Suno-API的Token失效
-            elif data.get('detail') == 'Unauthorized':
-                logger.warning(f"[Nicesuno] unauthorized, please check Suno-API...")
-                reply = Reply(ReplyType.TEXT, f"因为长期翘课，被Suno老师劝退了😂请重新找Suno老师申请入学...")
-                e_context["reply"] = reply
-                e_context.action = EventAction.BREAK_PASS
-            # 如果Suno超过限额，则转换为创作歌词
-            elif data.get('detail') == 'Insufficient credits.':
-                logger.warning(f"[Nicesuno] insufficient credits, changed to generating lyrics...")
-                data = self._suno_generate_lyrics(suno_music_prompt)
-                if not data:
-                    error = f"response data of _suno_generate_lyrics is empty."
-                    raise Exception(error)
-                # 获取和发送歌词
-                lid = data['id']
-                logger.debug(f"[Nicesuno] start to handle lyrics, lid={lid}, data={data}")
-                threading.Thread(target=self._handle_lyric, args=(channel, context, lid, suno_music_prompt)).start()
-                # 发送写歌提醒
-                reply = Reply(ReplyType.TEXT, f"Suno老师说一天只能创作5次😂今天确实唱够了，{to_user_nickname}来为你写歌好不好😘")
-                e_context["reply"] = reply
-                e_context.action = EventAction.BREAK_PASS
-            # 获取和发送音乐
-            elif data.get('clips'):
-                aids = [clip['id'] for clip in data['clips']]
-                logger.debug(f"[Nicesuno] start to handle music, aids={aids}, data={data}")
-                threading.Thread(target=self._handle_music, args=(channel, context, aids)).start()
-                # 发送请稍等提醒
-                reply = Reply(ReplyType.TEXT, f"{actual_user_nickname}，{to_user_nickname}正在为您创作音乐，请稍等☕")
-                e_context["reply"] = reply
-                e_context.action = EventAction.BREAK_PASS
+            # 开始创作
+            if make_lyrics:
+                logger.info(f"[Nicesuno] start generating lyrics, suno_prompt={suno_prompt}.")
+                self._create_lyrics(e_context, suno_prompt)
             else:
-                error = f"no clips in response data, data={data}"
-                raise Exception(error)
+                logger.info(
+                    f"[Nicesuno] start generating {'instrumental' if make_instrumental else 'vocal'} music, suno_prompt={suno_prompt}.")
+                self._create_music(e_context, suno_prompt, make_instrumental)
         except Exception as e:
-            # 发送失败提醒
             logger.warning(f"[Nicesuno] failed to generate music, error={e}")
-            reply = Reply(ReplyType.TEXT, "抱歉！创作音乐失败，请稍后再试🥺")
+            reply = Reply(ReplyType.TEXT, "抱歉！创作失败了，请稍后再试🥺")
             e_context["reply"] = reply
             e_context.action = EventAction.BREAK_PASS
 
     # 创作音乐
-    def _suno_generate_music_with_description(self, suno_music_prompt, make_instrumental=False, retry_count=0):
-        payload = {
-            "gpt_description_prompt": suno_music_prompt,
-            "make_instrumental": make_instrumental,
-            "mv": "chirp-v3-0",
-        }
-        while retry_count >= 0:
-            try:
-                response = requests.post(f"{self.suno_api_base}/generate/description-mode", data=json.dumps(payload), timeout=(5, 30))
-                if response.status_code != 200:
-                    raise Exception(f"status_code is not ok, status_code={response.status_code}")
-                logger.debug(f"[Nicesuno] _suno_generate_music_with_description, response={response.text}")
-                return response.json()
-            except Exception as e:
-                logger.error(f"[Nicesuno] _suno_generate_music_with_description failed, suno_music_prompt={suno_music_prompt}, error={e}")
-                retry_count -= 1
-                time.sleep(5)
-
-    # 获取音乐信息
-    def _suno_get_music(self, aid, retry_count=3):
-        while retry_count >= 0:
-            try:
-                response = requests.get(f"{self.suno_api_base}/feed/{aid}", timeout=(5, 30))
-                if response.status_code != 200:
-                    raise Exception(f"status_code is not ok, status_code={response.status_code}")
-                logger.debug(f"[Nicesuno] _suno_get_music, response={response.text}")
-                return response.json()[0]
-            except Exception as e:
-                logger.error(f"[Nicesuno] _suno_get_music failed, aid={aid}, error={e}")
-                retry_count -= 1
-                time.sleep(5)
+    def _create_music(self, e_context, suno_prompt, make_instrumental=False):
+        custom_mode = False
+        # 自定义模式
+        if '标题' in suno_prompt and '风格' in suno_prompt:
+            regex_prompt = r' *标题[:：]?(?P<title>[\S ]*)\n+ *风格[:：]?(?P<tags>[\S ]*)(\n+(?P<lyrics>.*))?'
+            r = re.fullmatch(regex_prompt, suno_prompt, re.DOTALL)
+            title = r.group('title').strip() if r and r.group('title') else None
+            tags = r.group('tags').strip() if r and r.group('tags') else None
+            lyrics = r.group('lyrics').strip() if r and r.group('lyrics') else None
+            if r and (tags or lyrics):
+                custom_mode = True
+                logger.info(f"[Nicesuno] generating {'instrumental' if make_instrumental else 'vocal'} music in custom mode, title={title}, tags={tags}, lyrics={lyrics}")
+                data = self._suno_generate_music_custom_mode(title, tags, lyrics, make_instrumental)
+            else:
+                logger.warning(f"[Nicesuno] generating {'instrumental' if make_instrumental else 'vocal'} music in custom mode failed because of wrong format, suno_prompt={suno_prompt}")
+                reply = Reply(ReplyType.TEXT, self.get_help_text())
+                e_context["reply"] = reply
+                e_context.action = EventAction.BREAK_PASS
+                return
+        # 描述模式
+        else:
+            logger.info(f"[Nicesuno] generating {'instrumental' if make_instrumental else 'vocal'} music with description, description={suno_prompt}")
+            data = self._suno_generate_music_with_description(suno_prompt, make_instrumental)
+        
+        channel = e_context["channel"]
+        context = e_context["context"]
+        to_user_nickname = context["msg"].to_user_nickname
+        if not data:
+            logger.warning(f"response data of _suno_generate_music is empty.")
+            reply = Reply(ReplyType.TEXT, f"因为神秘原因，创作失败了😂请稍后再试...")
+        # 如果Suno超过限额
+        elif data.get('detail') == 'Insufficient credits.' and custom_mode:
+            logger.warning(f"[Nicesuno] insufficient credits in custom mode.")
+            reply = Reply(ReplyType.TEXT, f"Suno老师说一天只能创作5次😂今天确实唱够了，明天11点之后再来好不好😘")
+        elif data.get('detail') == 'Insufficient credits.':
+            logger.warning(f"[Nicesuno] insufficient credits with description, changed to generating lyrics...")
+            reply = Reply(ReplyType.TEXT, f"Suno老师说一天只能创作5次😂今天确实唱够了，{to_user_nickname}来为你写歌好不好😘")
+            self._create_lyrics(e_context, suno_prompt)
+        # 如果Suno-API的Token失效
+        elif data.get('detail'):
+            logger.warning(f"[Nicesuno] error occurred, response data={data}")
+            if data.get('detail') == 'Unauthorized':
+                reply = Reply(ReplyType.TEXT, f"因为长期翘课，被Suno老师劝退了😂请重新找Suno老师申请入学...")
+            elif data.get('detail') == 'Topic too long.':
+                reply = Reply(ReplyType.TEXT, f"因为废话太多，被Suno老师打回了😂请重新提交创作申请...")
+            elif data.get('detail') == 'Too many running jobs.':
+                reply = Reply(ReplyType.TEXT, f"Suno老师说工作太忙😂请稍等片刻再创作...")
+            else:
+                reply = Reply(ReplyType.TEXT, f"因为{data.get('detail')}，创作失败了😂请稍后再试...")
+        elif not data.get('clips'):
+            logger.warning(f"[Nicesuno] no clips in response data, response data={data}")
+            reply = Reply(ReplyType.TEXT, f"因为神秘原因，创作失败了😂请稍后再试...")
+        # 获取和发送音乐
+        else:
+            aids = [clip['id'] for clip in data['clips']]
+            logger.debug(f"[Nicesuno] start to handle music, aids={aids}, data={data}")
+            threading.Thread(target=self._handle_music, args=(channel, context, aids)).start()
+            reply = Reply(ReplyType.TEXT, f"{to_user_nickname}正在为您创作音乐，请稍等☕")
+        e_context["reply"] = reply
+        e_context.action = EventAction.BREAK_PASS
 
     # 创作歌词
-    def _suno_generate_lyrics(self, suno_lyric_prompt, retry_count=3):
-        payload = {
-            "prompt": suno_lyric_prompt
-        }
-        while retry_count >= 0:
-            try:
-                response = requests.post(f"{self.suno_api_base}/generate/lyrics/", data=json.dumps(payload), timeout=(5, 30))
-                if response.status_code != 200:
-                    raise Exception(f"status_code is not ok, status_code={response.status_code}")
-                logger.debug(f"[Nicesuno] _suno_generate_lyrics, response={response.text}")
-                return response.json()
-            except Exception as e:
-                logger.error(f"[Nicesuno] _suno_generate_lyrics failed, suno_lyric_prompt={suno_lyric_prompt}, error={e}")
-                retry_count -= 1
-                time.sleep(5)
-
-    # 获取歌词信息
-    def _suno_get_lyrics(self, lid, retry_count=3):
-        while retry_count >= 0:
-            try:
-                response = requests.get(f"{self.suno_api_base}/lyrics/{lid}", timeout=(5, 30))
-                if response.status_code != 200:
-                    raise Exception(f"status_code is not ok, status_code={response.status_code}")
-                logger.debug(f"[Nicesuno] _suno_get_lyrics, response={response.text}")
-                return response.json()
-            except Exception as e:
-                logger.error(f"[Nicesuno] _suno_get_lyrics failed, lid={lid}, error={e}")
-                retry_count -= 1
-                time.sleep(5)
+    def _create_lyrics(self, e_context, suno_prompt):
+        data = self._suno_generate_lyrics(suno_prompt)
+        channel = e_context["channel"]
+        context = e_context["context"]
+        if not data:
+            error = f"response data of _suno_generate_lyrics is empty."
+            raise Exception(error)
+        # 获取和发送歌词
+        lid = data['id']
+        logger.debug(f"[Nicesuno] start to handle lyrics, lid={lid}, data={data}")
+        threading.Thread(target=self._handle_lyric, args=(channel, context, lid, suno_prompt)).start()
+        e_context.action = EventAction.BREAK_PASS
 
     # 下载和发送音乐
     def _handle_music(self, channel, context, aids: List):
@@ -224,6 +205,7 @@ class Nicesuno(Plugin):
             # 解析音乐信息
             title, metadata, audio_url = data["title"], data["metadata"], data["audio_url"]
             lyrics, tags, description_prompt = metadata["prompt"], metadata["tags"], metadata['gpt_description_prompt']
+            description_prompt = description_prompt if description_prompt else "自定义模式不展示"
             # 发送歌词
             if not self.is_send_lyrics:
                 logger.debug(f"[Nicesuno] 发送歌词开关关闭，不发送歌词！")
@@ -236,7 +218,7 @@ class Nicesuno(Plugin):
                 reply = Reply(ReplyType.TEXT, reply_text)
                 channel.send(reply, context)
             # 下载音乐
-            filename = f"{int(time.time())}_{sanitize_filename(description_prompt).replace(' ', '')[:20]}"
+            filename = f"{int(time.time())}-{sanitize_filename(title).replace(' ', '')[:20]}"
             audio_path = os.path.join(self.music_output_dir, f"{filename}.mp3")
             logger.debug(f"[Nicesuno] 下载音乐，audio_url={audio_url}")
             self._download_file(audio_url, audio_path)
@@ -301,6 +283,8 @@ class Nicesuno(Plugin):
 
     # 获取和发送歌词
     def _handle_lyric(self, channel, context, lid, description_prompt=""):
+        # 用户信息
+        actual_user_nickname = context["msg"].actual_user_nickname or context["msg"].other_user_nickname
         # 获取歌词信息
         start_time = time.time()
         while True:
@@ -314,11 +298,97 @@ class Nicesuno(Plugin):
             time.sleep(5)
         # 发送歌词
         title, lyrics = data["title"], data["text"]
-        actual_user_nickname = context["msg"].actual_user_nickname or context["msg"].other_user_nickname
         reply_text = f"🎻{title}🎻\n\n{lyrics}\n\n👶发起人：{actual_user_nickname}\n🍀制作人：Suno\n🎤提示词: {description_prompt}"
         logger.debug(f"[Nicesuno] 发送歌词，reply_text={reply_text}")
         reply = Reply(ReplyType.TEXT, reply_text)
         channel.send(reply, context)
+
+    # 创作音乐
+    def _suno_generate_music_with_description(self, description, make_instrumental=False, retry_count=0):
+        payload = {
+            "gpt_description_prompt": description,
+            "make_instrumental": make_instrumental,
+            "mv": "chirp-v3-0",
+        }
+        while retry_count >= 0:
+            try:
+                response = requests.post(f"{self.suno_api_base}/generate/description-mode", data=json.dumps(payload), timeout=(5, 30))
+                if response.status_code != 200:
+                    raise Exception(f"status_code is not ok, status_code={response.status_code}")
+                logger.debug(f"[Nicesuno] _suno_generate_music_with_description, response={response.text}")
+                return response.json()
+            except Exception as e:
+                logger.error(f"[Nicesuno] _suno_generate_music_with_description failed, description={description}, error={e}")
+                retry_count -= 1
+                time.sleep(5)
+
+    # 创作音乐
+    def _suno_generate_music_custom_mode(self, title=None, tags=None, lyrics=None, make_instrumental=False, retry_count=0):
+        payload = {
+            "title": title,
+            "tags": tags,
+            "prompt": lyrics,
+            "make_instrumental": make_instrumental,
+            "mv": "chirp-v3-0",
+            "continue_clip_id": None,
+            "continue_at": None,
+        }
+        while retry_count >= 0:
+            try:
+                response = requests.post(f"{self.suno_api_base}/generate", data=json.dumps(payload), timeout=(5, 30))
+                if response.status_code != 200:
+                    raise Exception(f"status_code is not ok, status_code={response.status_code}")
+                logger.debug(f"[Nicesuno] _suno_generate_music_custom_mode, response={response.text}")
+                return response.json()
+            except Exception as e:
+                logger.error(f"[Nicesuno] _suno_generate_music_custom_mode failed, title={title}, tags={tags}, lyrics={lyrics}, error={e}")
+                retry_count -= 1
+                time.sleep(5)
+
+    # 获取音乐信息
+    def _suno_get_music(self, aid, retry_count=3):
+        while retry_count >= 0:
+            try:
+                response = requests.get(f"{self.suno_api_base}/feed/{aid}", timeout=(5, 30))
+                if response.status_code != 200:
+                    raise Exception(f"status_code is not ok, status_code={response.status_code}")
+                logger.debug(f"[Nicesuno] _suno_get_music, response={response.text}")
+                return response.json()[0]
+            except Exception as e:
+                logger.error(f"[Nicesuno] _suno_get_music failed, aid={aid}, error={e}")
+                retry_count -= 1
+                time.sleep(5)
+
+    # 创作歌词
+    def _suno_generate_lyrics(self, suno_lyric_prompt, retry_count=3):
+        payload = {
+            "prompt": suno_lyric_prompt
+        }
+        while retry_count >= 0:
+            try:
+                response = requests.post(f"{self.suno_api_base}/generate/lyrics/", data=json.dumps(payload), timeout=(5, 30))
+                if response.status_code != 200:
+                    raise Exception(f"status_code is not ok, status_code={response.status_code}")
+                logger.debug(f"[Nicesuno] _suno_generate_lyrics, response={response.text}")
+                return response.json()
+            except Exception as e:
+                logger.error(f"[Nicesuno] _suno_generate_lyrics failed, suno_lyric_prompt={suno_lyric_prompt}, error={e}")
+                retry_count -= 1
+                time.sleep(5)
+
+    # 获取歌词信息
+    def _suno_get_lyrics(self, lid, retry_count=3):
+        while retry_count >= 0:
+            try:
+                response = requests.get(f"{self.suno_api_base}/lyrics/{lid}", timeout=(5, 30))
+                if response.status_code != 200:
+                    raise Exception(f"status_code is not ok, status_code={response.status_code}")
+                logger.debug(f"[Nicesuno] _suno_get_lyrics, response={response.text}")
+                return response.json()
+            except Exception as e:
+                logger.error(f"[Nicesuno] _suno_get_lyrics failed, lid={lid}, error={e}")
+                retry_count -= 1
+                time.sleep(5)
 
     # 下载文件
     def _download_file(self, file_url, file_path, retry_count=3):
@@ -348,4 +418,4 @@ class Nicesuno(Plugin):
 
     # 帮助文档
     def get_help_text(self, **kwargs):
-        return '使用Suno创作音乐：\n唱/演唱+“提示词”：创作声乐；\n演奏+“提示词”：创作器乐；\n例如：唱明天会更好。'
+        return "使用Suno创作音乐。\n1.创作声乐\n用法：唱/演唱<提示词>\n示例：唱明天会更好。\n\n2.创作器乐\n用法：演奏<提示词>\n示例：演奏明天会更好。\n\n3.创作歌词\n用法：写歌/作词<提示词>\n示例：写歌明天会更好。\n\n4.自定义模式\n用法：\n唱/演唱/演奏\n标题: <标题>\n风格: <风格1> <风格2> ...\n<歌词>\n备注：前三行必须为创作前缀、标题、风格，<标题><风格><歌词>三个值可以为空，但<风格><歌词>不可同时为空！"
